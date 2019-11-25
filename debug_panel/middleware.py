@@ -4,13 +4,15 @@ Debug Panel middleware
 import threading
 import time
 
-from django.core.urlresolvers import reverse, resolve, Resolver404
-from django.conf import settings
-from debug_panel.cache import cache
 import debug_toolbar.middleware
+from django.conf import settings
+from django.urls import reverse, resolve, Resolver404
+from django.utils.deprecation import MiddlewareMixin
 
 # the urls patterns that concern only the debug_panel application
 import debug_panel.urls
+from debug_panel.cache import cache
+
 
 def show_toolbar(request):
     """
@@ -25,11 +27,34 @@ def show_toolbar(request):
 debug_toolbar.middleware.show_toolbar = show_toolbar
 
 
-class DebugPanelMiddleware(debug_toolbar.middleware.DebugToolbarMiddleware):
+class DebugPanelMiddleware(MiddlewareMixin):
     """
     Middleware to set up Debug Panel on incoming request and render toolbar
     on outgoing response.
     """
+
+    def _process_request(self, request):
+        # Decide whether the toolbar is active for this request.
+        from debug_toolbar.middleware import get_show_toolbar, DebugToolbar
+
+        show_toolbar = get_show_toolbar()
+        if not show_toolbar(request):
+            return
+
+        toolbar = DebugToolbar(request)
+        self.__class__.debug_toolbars[threading.current_thread().ident] = toolbar
+
+        # Activate instrumentation ie. monkey-patch.
+        for panel in toolbar.enabled_panels:
+            panel.enable_instrumentation()
+
+        # Run process_request methods of panels like Django middleware.
+        response = None
+        for panel in toolbar.enabled_panels:
+            response = panel.process_request(request)
+            if response:
+                break
+        return response
 
     def process_request(self, request):
         """
@@ -44,10 +69,9 @@ class DebugPanelMiddleware(debug_toolbar.middleware.DebugToolbarMiddleware):
         try:
             res = resolve(request.path, urlconf=debug_panel.urls)
         except Resolver404:
-            return super(DebugPanelMiddleware, self).process_request(request)
+            return self._process_request(request)
 
         return res.func(request, *res.args, **res.kwargs)
-
 
     def process_response(self, request, response):
         """
